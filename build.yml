@@ -1,0 +1,102 @@
+name: Build APK
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: chickensoft-games/setup-godot@v2
+        with:
+          version: 4.7.2
+          use-dotnet: false
+          include-templates: true
+
+      - name: Unpack project
+        run: |
+          mkdir proj
+          unzip -q launcher_src.zip -d proj
+
+      - name: Android SDK
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platform-tools" "build-tools;35.0.1" "platforms;android-35" "cmake;3.10.2.4988404"
+
+      - name: Gradle build template
+        run: |
+          T=$(find ~/.local/share/godot/export_templates -name android_source.zip | head -1)
+          echo "template: $T"
+          mkdir -p proj/android/build
+          unzip -q "$T" -d proj/android/build
+          echo "4.7.2.stable" > proj/android/.build_version
+          touch proj/android/build/.gdignore
+          M=proj/android/build/AndroidManifest.xml
+          grep -q extractNativeLibs "$M" || sed -i 's/<application/<application android:extractNativeLibs="true"/' "$M"
+          grep -n extractNativeLibs "$M" || true
+
+      - name: proot from Termux packages
+        run: |
+          sudo apt-get install -y patchelf
+          mkdir termux && cd termux
+          BASE=https://packages.termux.dev/apt/termux-main
+          curl -fsSL "$BASE/dists/stable/main/binary-aarch64/Packages" -o Packages
+          for p in proot libtalloc libandroid-shmem; do
+            f=$(awk -v p="$p" '$1=="Package:"{cur=$2} $1=="Filename:" && cur==p {print $2; exit}' Packages)
+            echo "$p -> $f"
+            curl -fsSLO "$BASE/$f"
+          done
+          for d in *.deb; do dpkg-deb -x "$d" root; done
+          U=root/data/data/com.termux/files/usr
+          J="$GITHUB_WORKSPACE/proj/android/build/libs/arm64-v8a"
+          mkdir -p "$J"
+          cp "$U/bin/proot" "$J/libproot.so"
+          cp "$U/libexec/proot/loader" "$J/libproot-loader.so"
+          cp -L "$U/lib/libtalloc.so.2" "$J/libtalloc.so"
+          cp -L "$U/lib/libandroid-shmem.so" "$J/libandroid-shmem.so"
+          for f in libproot.so libtalloc.so libandroid-shmem.so; do
+            patchelf --set-rpath '$ORIGIN' "$J/$f"
+          done
+          patchelf --replace-needed libtalloc.so.2 libtalloc.so "$J/libproot.so"
+          readelf -d "$J/libproot.so" | grep -E "NEEDED|RUNPATH|RPATH" || true
+          ls -l "$J"
+
+      - name: Godot settings and keystore
+        run: |
+          keytool -genkey -v -keystore "$HOME/debug.keystore" -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 -storepass android -keypass android -dname "CN=Android Debug,O=Android,C=US"
+          mkdir -p ~/.config/godot
+          for n in 4 4.7; do
+            cat > ~/.config/godot/editor_settings-$n.tres << EOT
+          [gd_resource type="EditorSettings" format=3]
+
+          [resource]
+          export/android/android_sdk_path = "$ANDROID_HOME"
+          export/android/java_sdk_path = "$JAVA_HOME"
+          EOT
+          done
+
+      - name: Export APK
+        working-directory: proj
+        env:
+          GODOT_ANDROID_KEYSTORE_DEBUG_PATH: ~/debug.keystore
+          GODOT_ANDROID_KEYSTORE_DEBUG_USER: androiddebugkey
+          GODOT_ANDROID_KEYSTORE_DEBUG_PASSWORD: android
+        run: |
+          export GODOT_ANDROID_KEYSTORE_DEBUG_PATH="$HOME/debug.keystore"
+          godot --headless --import || true
+          mkdir -p out
+          godot --headless --export-debug "Android" out/launcher.apk
+          ls -l out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: launcher-apk
+          path: proj/out/launcher.apk
