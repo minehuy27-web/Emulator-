@@ -1,0 +1,36 @@
+name: Build APK
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: chickensoft-games/setup-godot@v2
+        with:
+          version: 4.7.2
+          use-dotnet: false
+          include-templates: true
+
+      - name: Unpack project
+        run: |
+          rm -rf proj
+          mkdir proj
+          unzip -q launcher_src.zip -d proj
+
+      - name: Build
+        run: bash proj/ci/build.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: launcher-apk
+          path: proj/out/launcher.apk
